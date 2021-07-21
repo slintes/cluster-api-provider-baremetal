@@ -1097,19 +1097,30 @@ func (a *Actuator) remediateIfNeeded(ctx context.Context, machine *machinev1beta
 	}
 
 	if _, needsRemediation := machine.Annotations[externalRemediationAnnotation]; !needsRemediation {
-		return nil
-	}
+		// It can happen that an unhealthy machine with external remediation annotation got healthy, and the external
+		// remediation annotation was removed by the MHC controller, before remediation finished or even started
+		// (e.g. the metal3 pod is not running, but machine was rebooted manually).
+		// In this case stop remediation, if possible.
 
-	node, err := a.getNodeByMachine(ctx, machine)
-
-	if err != nil {
-		if !errors.IsNotFound(err) {
-			log.Printf("Failed to get Node from Machine %s: %s", machine.Name, err.Error())
-			return err
+		// If bmh isn't requested to power off, and the machine isn't marked as powered off for remediation,
+		// there is no ongoing remediation, and there is nothing to do
+		powerOffRequestExists := hasPowerOffRequestAnnotation(baremetalhost)
+		_, poweredOffForRemediationExists := machine.Annotations[poweredOffForRemediation]
+		if !powerOffRequestExists && !poweredOffForRemediationExists {
+			return nil
 		}
+
+		// If bmh was requested to power off, but the machine isn't marked as powered off for remediation yet:
+		// remediation just started and it's fine to stop it by removing the power off request.
+		// That way the bmh won't be powered off at all, or immediately powered on again.
+		if powerOffRequestExists && !poweredOffForRemediationExists {
+			return a.requestPowerOn(ctx, baremetalhost)
+		}
+
+		// In all other cases: there is an ongoing remediation, which should not be interrupted
 	}
 
-	if _, poweredOffForRemediation := machine.Annotations[poweredOffForRemediation]; !poweredOffForRemediation {
+	if _, poweredOffForRemediationExists := machine.Annotations[poweredOffForRemediation]; !poweredOffForRemediationExists {
 		if !hasPowerOffRequestAnnotation(baremetalhost) {
 			log.Printf("Found an unhealthy machine, requesting power off. Machine name: %s", machine.Name)
 			return a.requestPowerOff(ctx, baremetalhost)
